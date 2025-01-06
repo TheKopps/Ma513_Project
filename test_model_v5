@@ -1,0 +1,72 @@
+import json
+from transformers import BertTokenizerFast, BertForTokenClassification
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+
+# Charger le modèle, le tokenizer et les étiquettes
+model_dir = 'C:/Users/adrie/OneDrive/Bureau/IPSA/Aero5/Ma513/Projet/Ma513_Project/saved_model'
+model = BertForTokenClassification.from_pretrained(model_dir)
+tokenizer = BertTokenizerFast.from_pretrained(model_dir)
+
+with open(f'{model_dir}/unique_labels.json', 'r') as f:
+    unique_labels = json.load(f)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+model.eval()
+
+# Charger les fichiers de test
+def load_jsonlines(filepath):
+    with open(filepath, 'r') as f:
+        return [json.loads(line) for line in f]
+
+testing_data = load_jsonlines('C:/Users/adrie/OneDrive/Bureau/IPSA/Aero5/Ma513/Projet/Ma513_Project/Data/NER-TESTING.jsonlines')
+
+# Prétraitement des données
+def encode_data(data, tokenizer, max_length=256):
+    input_ids, attention_masks = [], []
+    tokens_data = []
+    for entry in data:
+        tokens = entry['tokens']
+        encodings = tokenizer(tokens, is_split_into_words=True, truncation=True, padding='max_length', max_length=max_length)
+        input_ids.append(encodings['input_ids'])
+        attention_masks.append(encodings['attention_mask'])
+        tokens_data.append(tokens)
+    return input_ids, attention_masks, tokens_data
+
+test_inputs, test_masks, tokens_data = encode_data(testing_data, tokenizer)
+test_loader = DataLoader(TensorDataset(torch.tensor(test_inputs), torch.tensor(test_masks)), batch_size=16)
+
+# Prédictions
+pred_labels = []
+
+with torch.no_grad():
+    for batch in test_loader:
+        input_ids, attention_masks = [b.to(device) for b in batch]
+        outputs = model(input_ids, attention_mask=attention_masks)
+        predictions = torch.argmax(outputs.logits, dim=-1)
+
+        for i, pred_seq in enumerate(predictions):
+            pred_seq_labels = [
+                unique_labels[pred.item()]
+                for pred, mask in zip(pred_seq, input_ids[i])
+                if mask.item() != tokenizer.pad_token_id
+            ]
+            pred_labels.append(pred_seq_labels)
+
+# Générer les prédictions au format demandé
+output_data = []
+for original_entry, preds in zip(testing_data, pred_labels):
+    output_data.append({
+        "unique_id": original_entry["unique_id"],
+        "tokens": original_entry["tokens"],
+        "ner_tags": preds[:len(original_entry["tokens"])]  # Limitez aux tokens originaux
+    })
+
+# Sauvegarder les prédictions
+output_path = 'C:/Users/adrie/OneDrive/Bureau/IPSA/Aero5/Ma513/Projet/Ma513_Project/Data/NER-PREDICTIONS.jsonlines'
+with open(output_path, 'w') as f:
+    for entry in output_data:
+        f.write(json.dumps(entry) + "\n")
+
+print(f"Predictions saved to {output_path}")
